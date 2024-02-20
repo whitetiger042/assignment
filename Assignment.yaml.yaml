@@ -1,0 +1,432 @@
+AWSTemplateFormatVersion: 2010-09-09
+
+#--------------------------------Description------------------------------------------------
+
+Description: This template creates VPC with public, private subnet and launch 2 instances (public, private)
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      -
+        Label:
+          default: "Network Configuration"
+        Parameters:
+          - VpcCIDR
+          - PublicSubnetCIDR
+          - PrivateSubnetCIDR
+      -
+        Label:
+          default: "Amazon EC2 Configuration"
+        Parameters:
+          - InstanceTypeParameter
+          - BastionHostKey
+          - PrivateInstanceKey
+
+#--------------------------------Parameters------------------------------------------------
+
+Parameters:
+  VpcCIDR:                             
+    Default: 10.0.0.0/16
+    Description: Please enter IP range for this VPC
+    Type: String
+
+  PublicSubnetCIDR:
+    Default: 10.0.0.0/24
+    Description: Please enter IP range for public Subnet
+    Type: String
+
+  PrivateSubnetCIDR:
+    Default: 10.0.1.0/24
+    Description: Please enter IP range for private Subnet
+    Type: String
+
+  AutoScalingGroupName:
+    Default: mywebappasg
+    Description: Define AutoScaling GroupName
+    Type: String
+
+  SSHLocation:
+    AllowedPattern: (\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})/(\d{1,2})
+    ConstraintDescription: must be a valid IP CIDR range of the form x.x.x.x/x.
+    Default: 0.0.0.0/0
+    Description: The IP address range that can be used to access the web server using SSH.
+    MaxLength: 18
+    MinLength: 9
+    Type: String
+
+  InstanceTypeParameter:
+    Type: String
+    Default: t3.micro
+    Description: Enetr the instance type- allowed values are t2.micro, m2.small
+
+  BastionHostKey:
+    Type: AWS::EC2::KeyPair::KeyName
+    Description: Name of an existing key to enable SSH access.
+
+  PrivateInstanceKey:
+    Type: AWS::EC2::KeyPair::KeyName
+    Description: Name of an existing key to enable SSH access.
+
+  ImageId:
+    Type: String
+    Default: ami-0c7217cdde317cfec
+    Description: AMI id for instances in private subnet 
+
+  InstanceType:
+    Type: String
+    Default: t2.micro
+    Description: Instance Type  for instances in private subnet 
+
+  CPUScaleOutThreshold:
+    Default: '20'
+    Description: Define Alarm ScaleIn Threshold
+    Type: String
+
+  CPUScaleInThreshold:
+    Default: '20'
+    Description: Define Alarm ScaleIn Threshold
+    Type: String
+
+Resources:
+
+#----------------------------------------Network level Config ------------------------------------
+
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcCIDR
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      InstanceTenancy: default
+      Tags:
+        - Key: Name
+          Value: Assignment-VPC
+
+  myInternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: IGW
+
+  InternetGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      InternetGatewayId: !Ref myInternetGateway
+      VpcId: !Ref VPC
+
+  PublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: !Select [ 0, !GetAZs '' ]
+      CidrBlock: !Ref PublicSubnetCIDR
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: PublicSubnet
+      VpcId: !Ref VPC
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: PublicRouteTable
+
+  PublicRoutes:
+    Type: AWS::EC2::Route
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref myInternetGateway
+      RouteTableId: !Ref PublicRouteTable
+
+  mySubnetPublicRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet
+      RouteTableId: !Ref PublicRouteTable
+
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: PrivateRouteTable
+
+  NATGatewayEIP:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+
+  NATGateway:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NATGatewayEIP.AllocationId
+      SubnetId: !Ref PublicSubnet
+      Tags:
+        - Key: Name
+          Value: natGateway
+
+  RouteNATGateway:
+    DependsOn: NATGateway
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      DestinationCidrBlock: '0.0.0.0/0'
+      NatGatewayId: !Ref NATGateway
+
+  PrivateSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: !Select [ 1, !GetAZs '' ]
+      CidrBlock: !Ref PrivateSubnetCIDR
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: PrivateSubnet
+      VpcId: !Ref VPC
+
+
+  myPrivateSubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet
+      RouteTableId: !Ref PrivateRouteTable
+
+#----------------------------------------Autoscaling Config ------------------------------------
+
+
+  MyLaunchConfig:
+    Type: AWS::AutoScaling::LaunchConfiguration
+    Properties:
+      ImageId: !Ref ImageId
+      InstanceType: !Ref InstanceType
+      UserData: YourUserDataScript
+      SecurityGroups:
+        - StackALBSecGrp
+      BlockDeviceMappings: 
+        - DeviceName: /dev/xvdcz
+          Ebs:
+            VolumeSize: 22
+            VolumeType: gp2
+            DeleteOnTermination: true
+            Encrypted: true
+      UserData: !Base64 
+        'Fn::Join':
+          - ''
+          - - |
+              #!/bin/bash -v
+            - >
+              sudo sed -i 's/Update-Package-Lists "1"/Update-Package-Lists
+              "0"/g' /etc/apt/apt.conf.d/20auto-upgrades
+            - >
+              sudo sed -i 's/Unattended-Upgrade "1"/Unattended-Upgrade "0"/g'
+              /etc/apt/apt.conf.d/20auto-upgrades
+            - |
+              sudo apt install unzip
+
+  MyAutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      AutoScalingGroupName: !Ref AutoScalingGroupName
+      AvailabilityZones: [us-east-1a, us-east-1d]
+      LaunchConfigurationName: !Ref MyLaunchConfig
+      MinSize: 2
+      MaxSize: 4
+      DesiredCapacity: 3
+
+  AsgCpuScaleOut:
+    Type: 'AWS::AutoScaling::ScalingPolicy'
+    Properties:
+      AdjustmentType: ChangeInCapacity
+      AutoScalingGroupName: !Ref MyAutoScalingGroup
+      Cooldown: '300'
+      ScalingAdjustment: '1'
+
+  AsgCpuScaleIn:
+    Type: 'AWS::AutoScaling::ScalingPolicy'
+    Properties:
+      AdjustmentType: ChangeInCapacity
+      AutoScalingGroupName: !Ref MyAutoScalingGroup
+      Cooldown: '300'
+      ScalingAdjustment: '-1'
+
+  CPUAlarmHigh:
+    Type: 'AWS::CloudWatch::Alarm'
+    Properties:
+      AlarmName: application-cpu-high
+      EvaluationPeriods: '1'
+      Statistic: Average
+      Threshold: !Ref CPUScaleOutThreshold
+      AlarmDescription: Alarm if CPU high
+      Period: '300'
+      AlarmActions:
+        - !Ref AsgCpuScaleOut
+      Namespace: AWS/EC2
+      Dimensions:
+        - Name: AutoScalingGroupName
+          Value: !Ref MyAutoScalingGroup
+      ComparisonOperator: GreaterThanThreshold
+      MetricName: CPUUtilization
+
+  CPUAlarmLow:
+    Type: 'AWS::CloudWatch::Alarm'
+    Properties:
+      AlarmName: application-cpu-low
+      EvaluationPeriods: '3'
+      Statistic: Average
+      Threshold: !Ref CPUScaleInThreshold
+      AlarmDescription: Alarm if CPU low
+      Period: '300'
+      AlarmActions:
+        - !Ref AsgCpuScaleIn
+      Namespace: AWS/EC2
+      Dimensions:
+        - Name: AutoScalingGroupName
+          Value: !Ref AutoScalingGroupName
+      ComparisonOperator: LessThanOrEqualToThreshold
+      MetricName: CPUUtilization
+
+#----------------------------------------------------------------------------------------------------
+  StackALBSecGrp:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: sg for service elb
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - CidrIp: "0.0.0.0/0"
+        - IpProtocol: -1 # Allows traffic from all ports 
+      Tags:
+        - Key: Name
+          Value: alb-sg
+
+  MyLoadBalancer:
+    Type: AWS::ElasticLoadBalancing::LoadBalancer
+    Properties:
+      AvailabilityZones: [us-east-1a, us-east-1d]
+      Listeners:
+        - LoadBalancerPort: 80
+          InstancePort: 80
+          Protocol: HTTP
+      Subnets: !Ref PublicSubnet
+      SecurityGroups:
+        - !Ref StackALBSecGrp
+      HealthCheck:
+        Target: "HTTP:80/"
+        HealthyThreshold: "3"
+        UnhealthyThreshold: "5"
+        Interval: "30"
+        Timeout: "5"
+      Instances: !Ref MyAutoScalingGroup
+
+#----------------------------------------------------------------------------------
+
+  Certificate:
+    Type: 'AWS::CertificateManager::Certificate'
+    Properties:
+      DomainName: 'test.example.com'
+      ValidationMethod: 'DNS'
+      Tags:
+        - Key: test-certificate
+          Value: Certificate
+
+  HostedZone:
+    Type: 'AWS::Route53::HostedZone'
+    Properties:
+      Name: 'example.com'
+      VPCs:
+        - VPCId: !Ref VPC
+          VPCRegion: !Ref 'AWS::Region'
+      HostedZoneTags: 
+        - Key: hostedzone
+          Value: example
+
+  DNSRecord:
+    Type: 'AWS::Route53::RecordSet'
+    Properties:
+      HostedZoneId: !Ref HostedZone
+      Name: 'test.example.com'
+      Type: A
+      TTL: '60'
+      AliasTarget:
+        DNSName: !GetAtt 
+          - MyLoadBalancer
+          - DNSName
+
+
+  Listener:
+    Type: 'AWS::ElasticLoadBalancingV2::Listener'
+    Properties:
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref AppElbTargetGrp
+      LoadBalancerArn: !Ref MyLoadBalancer
+      Port: 443
+      Protocol: HTTPS
+      SslPolicy: 'ELBSecurityPolicy-TLS13-1-2-2021-06'
+      Certificates:
+        - CertificateArn: !Ref Certificate
+
+  AppElbTargetGrp:
+    Type: 'AWS::ElasticLoadBalancingV2::TargetGroup'
+    Properties:
+      HealthCheckIntervalSeconds: 30
+      HealthCheckProtocol: HTTP
+      HealthCheckTimeoutSeconds: 15
+      HealthyThresholdCount: 5
+      HealthCheckPath: /health
+      Name: ApplicationTG
+      Port: 80
+      Protocol: HTTP 
+      TargetGroupAttributes:
+        - Key: deregistration_delay.timeout_seconds
+          Value: '20'
+      UnhealthyThresholdCount: 3
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: ApplicationTG
+
+#--------------------------------------------------------------------------------
+
+Outputs:
+  VPC:
+    Description: VPC
+    Export:
+      Name: !Sub ${AWS::StackName}-VPC
+    Value: !Ref VPC
+
+  PublicSubnet:
+    Description: Public Subnet
+    Export:
+      Name: !Sub ${AWS::StackName}-PublicSubnet
+    Value: !Ref PublicSubnet
+
+  PublicRouteTable:
+    Description: Public Route Table
+    Export:
+      Name: !Sub ${AWS::StackName}-PublicRouteTable
+    Value: !Ref PublicRouteTable
+
+  PrivateSubnet:
+    Description: Public Subnet ID
+    Export:
+      Name: !Sub ${AWS::StackName}-PrivateSubnet
+    Value: !Ref PrivateSubnet
+
+  PrivateRouteTable:
+    Description: Private Route table
+    Export:
+      Name: !Sub ${AWS::StackName}-PrivateRouteTable
+    Value: !Ref PrivateRouteTable
+
+  NATGateway:
+    Description: NATGateway ID
+    Export:
+      Name: !Sub ${AWS::StackName}-NATGateway
+    Value: !Ref NATGateway
+
+
+
+
